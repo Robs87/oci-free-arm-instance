@@ -1,5 +1,4 @@
 name: Try to Create OCI VM
-# 每 5 分钟自动尝试创建 ARM 实例
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -35,7 +34,6 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-
           pip install oci-cli
 
           mkdir -p ~/.oci
@@ -51,7 +49,6 @@ jobs:
 
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          # 尝试创建实例
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
@@ -78,30 +75,25 @@ jobs:
             exit 1
           fi
 
-      - name: Send Telegram Notification
+      - name: Notify Telegram
         if: always()
         env:
           TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          VM_STATUS: ${{ steps.create_vm.outcome }}
-          VM_LOG: ${{ steps.create_vm.outputs.log_data }}
+          VM_OUTCOME: ${{ steps.create_vm.outcome }}
         run: |
-          if [ "$VM_STATUS" = "success" ]; then
-            TEXT="🟢 *OCI ARM 实例创建成功！* 请立即去 Actions 禁用此 workflow。"
+          if [ "$VM_OUTCOME" = "success" ]; then
+            export TG_TEXT="🟢 *OCI ARM 实例创建成功！* 请立即去 Actions 禁用 workflow"
           else
-            LOG_TAIL=$(echo "$VM_LOG" | tail -c 300 | sed 's/["\\]//g')
-            TEXT="🔴 *OCI ARM 抢注失败* (Out of host capacity) 5分钟后重试。"
+            export TG_TEXT="🔴 OCI ARM 抢注失败 (Out of host capacity) 5分钟后重试"
           fi
-
           python3 -c "
           import urllib.request, json, os
-          token = os.environ['TG_BOT_TOKEN']
-          chat_id = os.environ['TG_CHAT_ID']
-          text = os.environ['TEXT']
-          data = json.dumps({'chat_id': chat_id, 'parse_mode': 'Markdown', 'text': text}).encode()
-          req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage', data=data, headers={'Content-Type': 'application/json'})
-          try:
-              urllib.request.urlopen(req, timeout=10)
-          except Exception as e:
-              print(f'Telegram notify failed: {e}')
+          t = os.environ['TG_BOT_TOKEN']
+          c = os.environ['TG_CHAT_ID']
+          x = os.environ['TG_TEXT']
+          d = json.dumps({'chat_id': c, 'text': x}).encode()
+          r = urllib.request.Request(f'https://api.telegram.org/bot{t}/sendMessage', data=d, headers={'Content-Type': 'application/json'})
+          try: urllib.request.urlopen(r, timeout=10)
+          except Exception as e: print(f'Telegram error: {e}')
           " || true
