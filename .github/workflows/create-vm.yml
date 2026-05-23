@@ -1,23 +1,23 @@
 name: Try to Create OCI VM
-# It will run every 5 minutes.
+# 每 5 分钟自动尝试创建 ARM 实例
 on:
   schedule:
     - cron: "*/5 * * * *"
-  # Allows you to manually run this workflow from the Actions tab
   workflow_dispatch:
+
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
-  IMAGE_ID: "ocid1.image.oc1.ap-singapore-1.aaaaaaaa5a3xwkk5vaichk47fms2uzvsqeriats2uorf6kwgq3l3nwrbhipa"
+  IMAGE_ID: ${{ secrets.IMAGE_ID }}
   SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-  AD_NAME: "KClJ:AP-SINGAPORE-1-AD-1"
-  OCI_CLI_REGION: "ap-singapore-1"
+  AD_NAME: ${{ secrets.AD_NAME }}
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
   OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
 
 jobs:
-  build-and-deploy:
+  create-vm:
     runs-on: ubuntu-latest
     steps:
       - name: Cache pip packages
@@ -32,8 +32,7 @@ jobs:
 
       - name: Setup OCI CLI and Try to Create VM
         id: create_vm
-        # This forces the job to succeed so the cache will save.
-        continue-on-error: true 
+        continue-on-error: true
         run: |
           set -o pipefail
 
@@ -49,9 +48,10 @@ jobs:
           echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
           echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
           echo "region=${{ env.OCI_CLI_REGION }}" >> ~/.oci/config
+
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          # Run the command, capture ALL output, and use '|| true' to prevent the script from exiting early.
+          # 尝试创建实例，捕获所有输出
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
@@ -61,36 +61,46 @@ jobs:
             --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
-            --display-name "coolify-vm" \
+            --display-name "oci-arm-vm" \
             --boot-volume-size-in-gbs 200 2>&1 || true)
 
-          # Store the log as a GitHub step output
+          # 存储 log 为 step output
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
           echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          # Check the log content for an error string.
+          # 检查是否成功
           if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "Success! 'PROVISIONING' state found in output."
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "✅ Success! VM is PROVISIONING."
             exit 0
           else
-            echo "Error: Success string not found in OCI output. Failing the step."
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "❌ VM creation failed (likely Out of host capacity)."
             exit 1
           fi
 
-      - name: Send Discord Notification
+      - name: Send Telegram Notification
         if: always()
-        uses: sarisia/actions-status-discord@v1.15.4
-        with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
-          status: ${{ steps.create_vm.outcome }}
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
-          description: |
-            Attempt to create A1.Flex VM.
-            **Status:** `${{ steps.create_vm.outcome }}`
+        run: |
+          STATUS="${{ steps.create_vm.outcome }}"
+          if [ "$STATUS" = "success" ]; then
+            EMOJI="🟢"
+            MSG="OCI ARM 实例创建成功！请立即去 Actions 禁用此 workflow。"
+          else
+            EMOJI="🔴"
+            MSG="OCI ARM 实例创建失败（大概率 Out of host capacity），5 分钟后重试。"
+          fi
 
-            **Log Output:**
-            ```json
-            ${{ steps.create_vm.outputs.log_data }}
-            ```
+          # 截取最后 500 字符的日志避免消息过长
+          LOG="${{ steps.create_vm.outputs.log_data }}"
+          LOG_SHORT=$(echo "$LOG" | tail -c 500)
+
+          PAYLOAD=$(cat <<EOF
+          {"chat_id":"${{ secrets.TELEGRAM_CHAT_ID }}","parse_mode":"Markdown","text":"$EMOJI *OCI VM Status: $STATUS*\n\n$MSG\n\n\`\`\`\n$LOG_SHORT\n\`\`\`"}
+          EOF
+          )
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || true
