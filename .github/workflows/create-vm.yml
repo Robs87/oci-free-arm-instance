@@ -51,7 +51,7 @@ jobs:
 
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          # 尝试创建实例，捕获所有输出
+          # 尝试创建实例
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
@@ -64,43 +64,44 @@ jobs:
             --display-name "oci-arm-vm" \
             --boot-volume-size-in-gbs 200 2>&1 || true)
 
-          # 存储 log 为 step output
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
           echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          # 检查是否成功
           if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
             echo "success=true" >> $GITHUB_OUTPUT
-            echo "✅ Success! VM is PROVISIONING."
+            echo "✅ VM is PROVISIONING!"
             exit 0
           else
             echo "success=false" >> $GITHUB_OUTPUT
-            echo "❌ VM creation failed (likely Out of host capacity)."
+            echo "❌ VM creation failed."
             exit 1
           fi
 
       - name: Send Telegram Notification
         if: always()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          VM_STATUS: ${{ steps.create_vm.outcome }}
+          VM_LOG: ${{ steps.create_vm.outputs.log_data }}
         run: |
-          STATUS="${{ steps.create_vm.outcome }}"
-          if [ "$STATUS" = "success" ]; then
-            EMOJI="🟢"
-            MSG="OCI ARM 实例创建成功！请立即去 Actions 禁用此 workflow。"
+          if [ "$VM_STATUS" = "success" ]; then
+            TEXT="🟢 *OCI ARM 实例创建成功！* 请立即去 Actions 禁用此 workflow。"
           else
-            EMOJI="🔴"
-            MSG="OCI ARM 实例创建失败（大概率 Out of host capacity），5 分钟后重试。"
+            LOG_TAIL=$(echo "$VM_LOG" | tail -c 300 | sed 's/["\\]//g')
+            TEXT="🔴 *OCI ARM 抢注失败* (Out of host capacity) 5分钟后重试。"
           fi
 
-          # 截取最后 500 字符的日志避免消息过长
-          LOG="${{ steps.create_vm.outputs.log_data }}"
-          LOG_SHORT=$(echo "$LOG" | tail -c 500)
-
-          PAYLOAD=$(cat <<EOF
-          {"chat_id":"${{ secrets.TELEGRAM_CHAT_ID }}","parse_mode":"Markdown","text":"$EMOJI *OCI VM Status: $STATUS*\n\n$MSG\n\n\`\`\`\n$LOG_SHORT\n\`\`\`"}
-          EOF
-          )
-
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD" || true
+          python3 -c "
+          import urllib.request, json, os
+          token = os.environ['TG_BOT_TOKEN']
+          chat_id = os.environ['TG_CHAT_ID']
+          text = os.environ['TEXT']
+          data = json.dumps({'chat_id': chat_id, 'parse_mode': 'Markdown', 'text': text}).encode()
+          req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage', data=data, headers={'Content-Type': 'application/json'})
+          try:
+              urllib.request.urlopen(req, timeout=10)
+          except Exception as e:
+              print(f'Telegram notify failed: {e}')
+          " || true
