@@ -75,6 +75,14 @@ jobs:
             exit 1
           fi
 
+      - name: Auto-disable workflow on success
+        if: steps.create_vm.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow disable create-vm.yml --repo ${{ github.repository }}
+          echo "✅ Workflow disabled after successful VM creation."
+
       - name: Notify Telegram
         if: always()
         env:
@@ -83,7 +91,7 @@ jobs:
           VM_OUTCOME: ${{ steps.create_vm.outcome }}
         run: |
           if [ "$VM_OUTCOME" = "success" ]; then
-            export TG_TEXT="🟢 *OCI ARM 实例创建成功！* 请立即去 Actions 禁用 workflow"
+            export TG_TEXT="🟢 OCI ARM 实例创建成功！Workflow 已自动禁用。SSH: ssh -i ~/.ssh/oci_arm_key ubuntu@<IP>"
           else
             export TG_TEXT="🔴 OCI ARM 抢注失败 (Out of host capacity) 5分钟后重试"
           fi
